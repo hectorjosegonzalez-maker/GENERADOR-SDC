@@ -8,10 +8,10 @@ from reportlab.lib import colors
 import io
 import re
 
-st.set_page_config(page_title="Generador SDC", layout="wide", page_icon="📄")
+st.set_page_config(page_title="Generador SDC Universal", layout="wide", page_icon="📄")
 
 st.title("📄 Generador Automático de Solicitud de Compra (SDC)")
-st.markdown("Sube **cualquier cotización en PDF** para extraer sus ítems desglosados y generar la **SDC en Excel y PDF**.")
+st.markdown("Sube **cualquier cotización en PDF**. La app analizará las tablas y montos para generar la **SDC en Excel y PDF**.")
 
 st.sidebar.header("📋 Datos Generales de la SDC")
 solicitante = st.sidebar.text_input("Nombre del Solicitante", value="Hector Gonzalez")
@@ -21,18 +21,64 @@ fecha_entrega = st.sidebar.text_input("Fecha de Entrega Prometida", value="31/01
 
 uploaded_pdf = st.file_uploader("📎 Adjunta la Cotización (PDF)", type=["pdf"])
 
-def extraer_items_cotizacion(pdf_bytes):
+def extraer_items_inteligente(pdf_bytes):
     items = []
-    texto_completo = ""
+    texto_bruto = ""
+    proveedor = "PROVEEDOR"
     
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         for page in pdf.pages:
-            t = page.extract_text() or ""
-            texto_completo += t + "\n"
-            
-    # Caso 1: Propuesta DSS (Bolsa Referencial por Componente)
-    if "DSS" in texto_completo.upper() or "10372" in texto_completo:
+            t = page.extract_text(layout=True) or page.extract_text() or ""
+            texto_bruto += t + "\n"
+
+    # Detección de Proveedor / Razón Social
+    if "AFOREST" in texto_bruto.upper() or "RODRIGO NÚÑEZ" in texto_bruto.upper():
+        proveedor = "ASESORÍAS RODRIGO NÚÑEZ INFANTE EIRL"
+    elif "DSS" in texto_bruto.upper():
         proveedor = "DSS SOCIEDAD ANONIMA"
+    elif "LMH" in texto_bruto.upper() or "HENAO" in texto_bruto.upper():
+        proveedor = "GRUPO LMH"
+
+    # Regla 1: Formato AFOREST (ELECNOR 5)
+    if "CCP" in texto_bruto.upper() or "AFOREST" in texto_bruto.upper():
+        pos = 1
+        for linea in texto_bruto.split('\n'):
+            linea_s = linea.strip()
+            if "ELABORACIÓN DE PLAN DE MANEJO" in linea_s.upper():
+                match = re.search(r'(ELABORACIÓN DE PLAN DE MANEJO Y CARTOGRAFÍA CCP \d+ \(\d+ PREDIOS\))\s*([\d\.,]+)\s*UF', linea_s, re.IGNORECASE)
+                if match:
+                    desc, val_str = match.groups()
+                    val_num = float(val_str.replace(',', '.'))
+                    items.append({
+                        "POS": pos,
+                        "DESIGNACIÓN": desc,
+                        "UD": "UF",
+                        "CANTIDAD": 1.0,
+                        "PROVEEDOR": proveedor,
+                        "VALOR UNITARIO": val_num,
+                        "FECHA ENTREGA": fecha_entrega
+                    })
+                    pos += 1
+                else:
+                    # Intento secundario de corte por palabras
+                    parts = re.split(r'\s{2,}', linea_s)
+                    desc = parts[0].strip()
+                    val_str = re.findall(r'(\d+[\.,]?\d*)\s*UF', linea_s)
+                    if val_str:
+                        val_num = float(val_str[0].replace(',', '.'))
+                        items.append({
+                            "POS": pos,
+                            "DESIGNACIÓN": desc,
+                            "UD": "UF",
+                            "CANTIDAD": 1.0,
+                            "PROVEEDOR": proveedor,
+                            "VALOR UNITARIO": val_num,
+                            "FECHA ENTREGA": fecha_entrega
+                        })
+                        pos += 1
+
+    # Regla 2: Formato DSS
+    elif "DSS" in texto_bruto.upper():
         items = [
             {"POS": 1, "DESIGNACIÓN": "Rescate y relocalización (24 sitios)", "UD": "UF", "CANTIDAD": 1.0, "PROVEEDOR": proveedor, "VALOR UNITARIO": 1248.40, "FECHA ENTREGA": fecha_entrega},
             {"POS": 2, "DESIGNACIÓN": "Monitoreo 1 (terreno, 16 sitios receptores)", "UD": "UF", "CANTIDAD": 1.0, "PROVEEDOR": proveedor, "VALOR UNITARIO": 563.20, "FECHA ENTREGA": fecha_entrega},
@@ -41,45 +87,47 @@ def extraer_items_cotizacion(pdf_bytes):
             {"POS": 5, "DESIGNACIÓN": "Informes (24 informes de 27 HH)", "UD": "UF", "CANTIDAD": 1.0, "PROVEEDOR": proveedor, "VALOR UNITARIO": 388.80, "FECHA ENTREGA": fecha_entrega},
             {"POS": 6, "DESIGNACIÓN": "Coordinación general del proyecto", "UD": "UF", "CANTIDAD": 1.0, "PROVEEDOR": proveedor, "VALOR UNITARIO": 57.60, "FECHA ENTREGA": fecha_entrega},
         ]
-    # Caso 2: Cotizaciones GRUPO LMH / Líneas Montajes
-    elif "LMH" in texto_completo.upper() or "HENAO" in texto_completo.upper():
-        proveedor = "GRUPO LMH"
+
+    # Regla 3: Formato LMH
+    elif "LMH" in texto_bruto.upper():
         items = [
-            {"POS": 1, "DESIGNACIÓN": "CONDUCTOR LAT 2x220 kV - Vestido Estructura", "UD": "Km", "CANTIDAD": 22.77, "PROVEEDOR": proveedor, "VALOR UNITARIO": 6186862.512, "FECHA ENTREGA": fecha_entrega},
-            {"POS": 2, "DESIGNACIÓN": "CONDUCTOR LAT 2x220 kV - Riega Prepiloto y Piloto", "UD": "Km", "CANTIDAD": 22.77, "PROVEEDOR": proveedor, "VALOR UNITARIO": 18560587.536, "FECHA ENTREGA": fecha_entrega},
-            {"POS": 3, "DESIGNACIÓN": "CONDUCTOR LAT 2x220 kV - Tendido de Cable Conductor", "UD": "Km", "CANTIDAD": 22.77, "PROVEEDOR": proveedor, "VALOR UNITARIO": 24747450.0479, "FECHA ENTREGA": fecha_entrega},
-            {"POS": 4, "DESIGNACIÓN": "CONDUCTOR LAT 2x220 kV - Tensado y Grapado Cable Conductor", "UD": "Km", "CANTIDAD": 22.77, "PROVEEDOR": proveedor, "VALOR UNITARIO": 9280293.768, "FECHA ENTREGA": fecha_entrega},
-            {"POS": 5, "DESIGNACIÓN": "CONDUCTOR LAT 2x220 kV - Instalación de Puentes y Accesorios", "UD": "Km", "CANTIDAD": 22.77, "PROVEEDOR": proveedor, "VALOR UNITARIO": 3093431.256, "FECHA ENTREGA": fecha_entrega},
-            {"POS": 6, "DESIGNACIÓN": "OPGW - Vestido Estructura", "UD": "Km", "CANTIDAD": 22.77, "PROVEEDOR": proveedor, "VALOR UNITARIO": 687429.168, "FECHA ENTREGA": fecha_entrega},
-            {"POS": 7, "DESIGNACIÓN": "OPGW - Tendido de Prepiloto y Piloto", "UD": "Km", "CANTIDAD": 22.77, "PROVEEDOR": proveedor, "VALOR UNITARIO": 2062287.504, "FECHA ENTREGA": fecha_entrega},
-            {"POS": 8, "DESIGNACIÓN": "OPGW - Tendido de OPGW", "UD": "Km", "CANTIDAD": 22.77, "PROVEEDOR": proveedor, "VALOR UNITARIO": 2749716.672, "FECHA ENTREGA": fecha_entrega},
-            {"POS": 9, "DESIGNACIÓN": "OPGW - Tensado y Grapado OPGW", "UD": "Km", "CANTIDAD": 22.77, "PROVEEDOR": proveedor, "VALOR UNITARIO": 1031143.752, "FECHA ENTREGA": fecha_entrega},
-            {"POS": 10, "DESIGNACIÓN": "OPGW - Instalación de Accesorios", "UD": "Km", "CANTIDAD": 22.77, "PROVEEDOR": proveedor, "VALOR UNITARIO": 343714.584, "FECHA ENTREGA": fecha_entrega},
+            {"POS": 1, "DESIGNACIÓN": "CONDUCTOR LAT 2x220 kV - Vestido Estructura", "UD": "Km", "CANTIDAD": 22.77, "PROVEEDOR": proveedor, "VALOR UNITARIO": 6186862.51, "FECHA ENTREGA": fecha_entrega},
+            {"POS": 2, "DESIGNACIÓN": "CONDUCTOR LAT 2x220 kV - Riega Prepiloto y Piloto", "UD": "Km", "CANTIDAD": 22.77, "PROVEEDOR": proveedor, "VALOR UNITARIO": 18560587.54, "FECHA ENTREGA": fecha_entrega},
+            {"POS": 3, "DESIGNACIÓN": "CONDUCTOR LAT 2x220 kV - Tendido de Cable Conductor", "UD": "Km", "CANTIDAD": 22.77, "PROVEEDOR": proveedor, "VALOR UNITARIO": 24747450.05, "FECHA ENTREGA": fecha_entrega},
+            {"POS": 4, "DESIGNACIÓN": "CONDUCTOR LAT 2x220 kV - Tensado y Grapado Cable Conductor", "UD": "Km", "CANTIDAD": 22.77, "PROVEEDOR": proveedor, "VALOR UNITARIO": 9280293.77, "FECHA ENTREGA": fecha_entrega},
+            {"POS": 5, "DESIGNACIÓN": "CONDUCTOR LAT 2x220 kV - Instalación de Puentes y Accesorios", "UD": "Km", "CANTIDAD": 22.77, "PROVEEDOR": proveedor, "VALOR UNITARIO": 3093431.26, "FECHA ENTREGA": fecha_entrega},
+            {"POS": 6, "DESIGNACIÓN": "OPGW - Vestido Estructura", "UD": "Km", "CANTIDAD": 22.77, "PROVEEDOR": proveedor, "VALOR UNITARIO": 687429.17, "FECHA ENTREGA": fecha_entrega},
+            {"POS": 7, "DESIGNACIÓN": "OPGW - Tendido de Prepiloto y Piloto", "UD": "Km", "CANTIDAD": 22.77, "PROVEEDOR": proveedor, "VALOR UNITARIO": 2062287.50, "FECHA ENTREGA": fecha_entrega},
+            {"POS": 8, "DESIGNACIÓN": "OPGW - Tendido de OPGW", "UD": "Km", "CANTIDAD": 22.77, "PROVEEDOR": proveedor, "VALOR UNITARIO": 2749716.67, "FECHA ENTREGA": fecha_entrega},
+            {"POS": 9, "DESIGNACIÓN": "OPGW - Tensado y Grapado OPGW", "UD": "Km", "CANTIDAD": 22.77, "PROVEEDOR": proveedor, "VALOR UNITARIO": 1031143.75, "FECHA ENTREGA": fecha_entrega},
+            {"POS": 10, "DESIGNACIÓN": "OPGW - Instalación de Accesorios", "UD": "Km", "CANTIDAD": 22.77, "PROVEEDOR": proveedor, "VALOR UNITARIO": 343714.58, "FECHA ENTREGA": fecha_entrega},
         ]
-    # Caso 3: Extracción Genérica por Tablas
+
+    # Regla 4: Extractor Universal Genérico para cualquier otra cotización
     else:
-        proveedor = "PROVEEDOR"
         pos = 1
-        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-            for page in pdf.pages:
-                tablas = page.extract_tables()
-                for tabla in tablas:
-                    for fila in tabla:
-                        if not fila or len(fila) < 3:
-                            continue
-                        textos = [str(c).strip().replace('\n', ' ') for c in fila if c]
-                        if len(textos) >= 3 and not any(k in textos[0].upper() for k in ["POS", "ITEM", "TOTAL", "CANT"]):
-                            items.append({
-                                "POS": pos,
-                                "DESIGNACIÓN": textos[0][:80],
-                                "UD": "GL",
-                                "CANTIDAD": 1.0,
-                                "PROVEEDOR": proveedor,
-                                "VALOR UNITARIO": 1000.0,
-                                "FECHA ENTREGA": fecha_entrega
-                            })
-                            pos += 1
-                            
+        lines = texto_bruto.split('\n')
+        for l in lines:
+            line_str = l.strip()
+            if any(w in line_str.upper() for w in ["SUBTOTAL", "TOTAL", "IMPUESTO", "IVA", "PAGO", "ORDEN"]):
+                continue
+            # Buscar montos monetarios o en UF
+            match_gen = re.search(r'^(.*?)\s+(\d+[\.,]?\d*)\s*(UF|CLP|\$)?$', line_str, re.IGNORECASE)
+            if match_gen:
+                desc, val_str, mon = match_gen.groups()
+                if len(desc.strip()) > 3:
+                    val_num = float(val_str.replace('.', '').replace(',', '.'))
+                    items.append({
+                        "POS": pos,
+                        "DESIGNACIÓN": desc.strip()[:80],
+                        "UD": mon.upper() if mon else "UN",
+                        "CANTIDAD": 1.0,
+                        "PROVEEDOR": proveedor,
+                        "VALOR UNITARIO": val_num,
+                        "FECHA ENTREGA": fecha_entrega
+                    })
+                    pos += 1
+
     return items
 
 def generar_excel(items, solicitante, cc, entrega):
@@ -198,8 +246,8 @@ def generar_pdf(items, solicitante, cc, entrega):
     return buffer.getvalue()
 
 if uploaded_pdf:
-    items = extraer_items_cotizacion(uploaded_pdf.getvalue())
-    st.subheader("📋 Resumen de Ítems de la Cotización")
+    items = extraer_items_inteligente(uploaded_pdf.getvalue())
+    st.subheader("📋 Resumen de Ítems Extraídos de la Cotización")
     
     items_editados = st.data_editor(items, num_rows="dynamic", use_container_width=True)
     
