@@ -154,4 +154,59 @@ def generar_pdf(items, solicitante, cc, entrega):
         Paragraph("<b>PROVEEDOR</b>", style_cell_bold),
         Paragraph("<b>VALOR UNITARIO</b>", style_cell_bold),
         Paragraph("<b>VALOR TOTAL</b>", style_cell_bold),
-        Paragraph("<b>
+        Paragraph("<b>FECHA ENTREGA</b>", style_cell_bold)
+    ]]
+    
+    for item in items:
+        v_tot = item['CANTIDAD'] * item['VALOR UNITARIO']
+        table_data.append([
+            Paragraph(str(item['POS']), style_cell),
+            Paragraph(item['DESIGNACIÓN'], style_cell),
+            Paragraph(item['UD'], style_cell),
+            Paragraph(f"{item['CANTIDAD']:.2f}", style_cell),
+            Paragraph(item['PROVEEDOR'], style_cell),
+            Paragraph(f"{item['VALOR UNITARIO']:,.2f}", style_cell),
+            Paragraph(f"{v_tot:,.2f}", style_cell),
+            Paragraph(item['FECHA ENTREGA'], style_cell)
+        ])
+        
+    t_items = Table(table_data, colWidths=[30, 260, 35, 45, 90, 110, 110, 70])
+    t_items.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1F497D')),
+        ('TEXTCOLOR', (0,0), (-1,0), colors.white),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#D3D3D3')),
+        ('ALIGN', (0,0), (0,-1), 'CENTER'),
+        ('ALIGN', (2,0), (3,-1), 'CENTER'),
+        ('ALIGN', (5,1), (6,-1), 'RIGHT'),
+    ]))
+    elements.append(t_items)
+    elements.append(Spacer(1, 10))
+    
+    sig_data = [
+        [Paragraph("<b>SOLICITADO POR</b><br/><br/><br/>_______________________<br/>Firma", style_cell),
+         Paragraph("<b>REVISADO POR</b><br/><br/><br/>_______________________<br/>Firma", style_cell),
+         Paragraph("<b>APROBADO POR</b><br/><br/><br/>_______________________<br/>Firma", style_cell)]
+    ]
+    t_sig = Table(sig_data, colWidths=[250, 250, 250])
+    t_sig.setStyle(TableStyle([
+        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+        ('BOX', (0,0), (-1,-1), 0.5, colors.HexColor('#1F497D')),
+    ]))
+    elements.append(t_sig)
+    
+    doc.build(elements)
+    return buffer.getvalue()
+
+if uploaded_pdf:
+    items = extraer_items_cotizacion(uploaded_pdf.getvalue())
+    st.subheader("📋 Resumen de Ítems de la Cotización")
+    
+    items_editados = st.data_editor(items, num_rows="dynamic", use_container_width=True)
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        excel_bytes = generar_excel(items_editados, solicitante, centro_costo, lugar_entrega)
+        st.download_button("📥 Descargar Excel SDC (.xlsx)", data=excel_bytes, file_name="Solicitud_de_Compra_SDC.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    with col2:
+        pdf_bytes = generar_pdf(items_editados, solicitante, centro_costo, lugar_entrega)
+        st.download_button("📄 Descargar PDF SDC (.pdf)", data=pdf_bytes, file_name="Solicitud_de_Compra_SDC.pdf", mime="application/pdf")
