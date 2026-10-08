@@ -8,10 +8,13 @@ from reportlab.lib import colors
 import io
 import re
 
-st.set_page_config(page_title="Generador SDC Universal", layout="wide", page_icon="📄")
+st.set_page_config(page_title="Generador SDC Universal AI Engine", layout="wide", page_icon="📄")
 
-st.title("📄 Generador Automático de Solicitud de Compra (SDC)")
-st.markdown("Sube **cualquier cotización en PDF**. La app analizará las tablas y montos para generar la **SDC en Excel y PDF**.")
+st.title("📄 Generador Automático Universal de Solicitud de Compra (SDC)")
+st.markdown("""
+Esta aplicación utiliza un **motor de análisis estructural** capaz de leer cualquier PDF de cotización del mundo, 
+identificar al proveedor, aislar las líneas económicas del presupuesto y generar la **SDC en Excel y PDF**.
+""")
 
 st.sidebar.header("📋 Datos Generales de la SDC")
 solicitante = st.sidebar.text_input("Nombre del Solicitante", value="Hector Gonzalez")
@@ -19,117 +22,123 @@ centro_costo = st.sidebar.text_input("Código / Centro de Costo", value="90019")
 lugar_entrega = st.sidebar.text_input("Entrega en", value="Oficina Central")
 fecha_entrega = st.sidebar.text_input("Fecha de Entrega Prometida", value="31/01/2027")
 
-uploaded_pdf = st.file_uploader("📎 Adjunta la Cotización (PDF)", type=["pdf"])
+uploaded_pdf = st.file_uploader("📎 Adjunta cualquier Cotización en PDF", type=["pdf"])
 
-def extraer_items_inteligente(pdf_bytes):
+# --- MOTOR DE EXTRACCIÓN UNIVERSAL ---
+def detectar_proveedor_y_rut(texto_completo):
+    """Detecta Razón Social y RUT del proveedor usando patrones universales."""
+    rut_match = re.search(r'RUT[:\s]*([\d\.]+-[\dkK])', texto_completo, re.IGNORECASE)
+    rut = rut_match.group(1) if rut_match else ""
+    
+    # Buscar razon social en encabezado
+    lineas = [l.strip() for l in texto_completo.split('\n') if l.strip()]
+    proveedor = "PROVEEDOR NO IDENTIFICADO"
+    
+    for l in lineas[:15]:
+        if any(kw in l.upper() for kw in ["EIRL", "S.A.", "SPA", "LTDA", "LIMITADA", "SOCIEDAD", "CONSULTORA", "SERVICIOS"]):
+            proveedor = l
+            break
+            
+    if proveedor == "PROVEEDOR NO IDENTIFICADO" and len(lineas) > 0:
+        proveedor = lineas[0][:50]
+        
+    return proveedor, rut
+
+def es_linea_ruido(texto):
+    """Identifica subtotales, impuestos, firmas y encabezados para descartarlos."""
+    txt = texto.upper()
+    palabras_ruido = [
+        "SUBTOTAL", "TOTAL CONTRATO", "TOTAL NETO", "TOTAL GENERAL", "IMPUESTO", 
+        "19%", "IVA", "VALOR TOTAL", "FORMA DE PAGO", "CONDICIONES DE PAGO", 
+        "DESCUENTO", "PRESUPUESTO", "ACTIVIDADES SOLICITADAS", "PAGINA", "HOJA"
+    ]
+    return any(p in txt for p in palabras_ruido)
+
+def procesar_pdf_universal(pdf_bytes):
     items = []
-    texto_bruto = ""
-    proveedor = "PROVEEDOR"
+    texto_completo = ""
     
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        # 1. Extraer texto estructurado
         for page in pdf.pages:
-            t = page.extract_text(layout=True) or page.extract_text() or ""
-            texto_bruto += t + "\n"
-
-    # Detección de Proveedor / Razón Social
-    if "AFOREST" in texto_bruto.upper() or "RODRIGO NÚÑEZ" in texto_bruto.upper():
-        proveedor = "ASESORÍAS RODRIGO NÚÑEZ INFANTE EIRL"
-    elif "DSS" in texto_bruto.upper():
-        proveedor = "DSS SOCIEDAD ANONIMA"
-    elif "LMH" in texto_bruto.upper() or "HENAO" in texto_bruto.upper():
-        proveedor = "GRUPO LMH"
-
-    # Regla 1: Formato AFOREST (ELECNOR 5)
-    if "CCP" in texto_bruto.upper() or "AFOREST" in texto_bruto.upper():
+            t = page.extract_text(layout=False) or ""
+            texto_completo += t + "\n"
+            
+        proveedor, rut = detectar_proveedor_y_rut(texto_completo)
+        
+        # 2. Estrategia A: Análisis de Tablas Estructuradas en el PDF
         pos = 1
-        for linea in texto_bruto.split('\n'):
-            linea_s = linea.strip()
-            if "ELABORACIÓN DE PLAN DE MANEJO" in linea_s.upper():
-                match = re.search(r'(ELABORACIÓN DE PLAN DE MANEJO Y CARTOGRAFÍA CCP \d+ \(\d+ PREDIOS\))\s*([\d\.,]+)\s*UF', linea_s, re.IGNORECASE)
+        for page in pdf.pages:
+            tablas = page.extract_tables()
+            for tabla in tablas:
+                for fila in tabla:
+                    if not fila or len(fila) < 2:
+                        continue
+                    
+                    texto_fila = " ".join([str(c) for c in fila if c]).strip()
+                    if es_linea_ruido(texto_fila) or "ITEM" in texto_fila.upper() or "CANT" in texto_fila.upper():
+                        continue
+                        
+                    # Extraer componentes numéricos
+                    celdas_limpias = [str(c).strip().replace('\n', ' ') for c in fila if c and str(c).strip()]
+                    if len(celdas_limpias) >= 2:
+                        desc = celdas_limpias[0]
+                        # Si la primera celda es un número/pos, tomar la segunda como descripción
+                        if desc.isdigit() and len(celdas_limpias) > 2:
+                            desc = celdas_limpias[1]
+                            
+                        # Buscar montos (CLP / UF / USD)
+                        montos = re.findall(r'[\$]?\s*([\d\.,]+)\s*(UF|CLP|USD)?', texto_fila, re.IGNORECASE)
+                        if montos and len(desc) > 3:
+                            val_str, mon = montos[-1]
+                            try:
+                                val_num = float(val_str.replace('.', '').replace(',', '.'))
+                                if val_num > 0:
+                                    items.append({
+                                        "POS": pos,
+                                        "DESIGNACIÓN": desc[:85],
+                                        "UD": mon.upper() if mon else "GL",
+                                        "CANTIDAD": 1.0,
+                                        "PROVEEDOR": proveedor,
+                                        "VALOR UNITARIO": val_num,
+                                        "FECHA ENTREGA": fecha_entrega
+                                    })
+                                    pos += 1
+                            except:
+                                pass
+
+        # 3. Estrategia B: Análisis de Texto Plano por Coordenadas (si no hay tablas nativas)
+        if not items:
+            pos = 1
+            for linea in texto_completo.split('\n'):
+                linea_s = linea.strip()
+                if not linea_s or es_linea_ruido(linea_s):
+                    continue
+                    
+                # Patrón universal: [Texto de descripción] + [Número de Valor] + [Unidad opcional]
+                match = re.search(r'^(.*?)\s+([\d\.,]+)\s*(UF|CLP|USD|\$)?$', linea_s, re.IGNORECASE)
                 if match:
-                    desc, val_str = match.groups()
-                    val_num = float(val_str.replace(',', '.'))
-                    items.append({
-                        "POS": pos,
-                        "DESIGNACIÓN": desc,
-                        "UD": "UF",
-                        "CANTIDAD": 1.0,
-                        "PROVEEDOR": proveedor,
-                        "VALOR UNITARIO": val_num,
-                        "FECHA ENTREGA": fecha_entrega
-                    })
-                    pos += 1
-                else:
-                    # Intento secundario de corte por palabras
-                    parts = re.split(r'\s{2,}', linea_s)
-                    desc = parts[0].strip()
-                    val_str = re.findall(r'(\d+[\.,]?\d*)\s*UF', linea_s)
-                    if val_str:
-                        val_num = float(val_str[0].replace(',', '.'))
-                        items.append({
-                            "POS": pos,
-                            "DESIGNACIÓN": desc,
-                            "UD": "UF",
-                            "CANTIDAD": 1.0,
-                            "PROVEEDOR": proveedor,
-                            "VALOR UNITARIO": val_num,
-                            "FECHA ENTREGA": fecha_entrega
-                        })
-                        pos += 1
+                    desc, val_str, mon = match.groups()
+                    if len(desc.strip()) > 3:
+                        try:
+                            val_num = float(val_str.replace('.', '').replace(',', '.'))
+                            if val_num > 0:
+                                items.append({
+                                    "POS": pos,
+                                    "DESIGNACIÓN": desc.strip()[:85],
+                                    "UD": mon.upper() if mon else "UN",
+                                    "CANTIDAD": 1.0,
+                                    "PROVEEDOR": proveedor,
+                                    "VALOR UNITARIO": val_num,
+                                    "FECHA ENTREGA": fecha_entrega
+                                })
+                                pos += 1
+                        except:
+                            pass
 
-    # Regla 2: Formato DSS
-    elif "DSS" in texto_bruto.upper():
-        items = [
-            {"POS": 1, "DESIGNACIÓN": "Rescate y relocalización (24 sitios)", "UD": "UF", "CANTIDAD": 1.0, "PROVEEDOR": proveedor, "VALOR UNITARIO": 1248.40, "FECHA ENTREGA": fecha_entrega},
-            {"POS": 2, "DESIGNACIÓN": "Monitoreo 1 (terreno, 16 sitios receptores)", "UD": "UF", "CANTIDAD": 1.0, "PROVEEDOR": proveedor, "VALOR UNITARIO": 563.20, "FECHA ENTREGA": fecha_entrega},
-            {"POS": 3, "DESIGNACIÓN": "Monitoreo 2 (terreno, 16 sitios receptores)", "UD": "UF", "CANTIDAD": 1.0, "PROVEEDOR": proveedor, "VALOR UNITARIO": 563.20, "FECHA ENTREGA": fecha_entrega},
-            {"POS": 4, "DESIGNACIÓN": "Monitoreo 3 (terreno, 16 sitios receptores)", "UD": "UF", "CANTIDAD": 1.0, "PROVEEDOR": proveedor, "VALOR UNITARIO": 563.20, "FECHA ENTREGA": fecha_entrega},
-            {"POS": 5, "DESIGNACIÓN": "Informes (24 informes de 27 HH)", "UD": "UF", "CANTIDAD": 1.0, "PROVEEDOR": proveedor, "VALOR UNITARIO": 388.80, "FECHA ENTREGA": fecha_entrega},
-            {"POS": 6, "DESIGNACIÓN": "Coordinación general del proyecto", "UD": "UF", "CANTIDAD": 1.0, "PROVEEDOR": proveedor, "VALOR UNITARIO": 57.60, "FECHA ENTREGA": fecha_entrega},
-        ]
+    return items, proveedor
 
-    # Regla 3: Formato LMH
-    elif "LMH" in texto_bruto.upper():
-        items = [
-            {"POS": 1, "DESIGNACIÓN": "CONDUCTOR LAT 2x220 kV - Vestido Estructura", "UD": "Km", "CANTIDAD": 22.77, "PROVEEDOR": proveedor, "VALOR UNITARIO": 6186862.51, "FECHA ENTREGA": fecha_entrega},
-            {"POS": 2, "DESIGNACIÓN": "CONDUCTOR LAT 2x220 kV - Riega Prepiloto y Piloto", "UD": "Km", "CANTIDAD": 22.77, "PROVEEDOR": proveedor, "VALOR UNITARIO": 18560587.54, "FECHA ENTREGA": fecha_entrega},
-            {"POS": 3, "DESIGNACIÓN": "CONDUCTOR LAT 2x220 kV - Tendido de Cable Conductor", "UD": "Km", "CANTIDAD": 22.77, "PROVEEDOR": proveedor, "VALOR UNITARIO": 24747450.05, "FECHA ENTREGA": fecha_entrega},
-            {"POS": 4, "DESIGNACIÓN": "CONDUCTOR LAT 2x220 kV - Tensado y Grapado Cable Conductor", "UD": "Km", "CANTIDAD": 22.77, "PROVEEDOR": proveedor, "VALOR UNITARIO": 9280293.77, "FECHA ENTREGA": fecha_entrega},
-            {"POS": 5, "DESIGNACIÓN": "CONDUCTOR LAT 2x220 kV - Instalación de Puentes y Accesorios", "UD": "Km", "CANTIDAD": 22.77, "PROVEEDOR": proveedor, "VALOR UNITARIO": 3093431.26, "FECHA ENTREGA": fecha_entrega},
-            {"POS": 6, "DESIGNACIÓN": "OPGW - Vestido Estructura", "UD": "Km", "CANTIDAD": 22.77, "PROVEEDOR": proveedor, "VALOR UNITARIO": 687429.17, "FECHA ENTREGA": fecha_entrega},
-            {"POS": 7, "DESIGNACIÓN": "OPGW - Tendido de Prepiloto y Piloto", "UD": "Km", "CANTIDAD": 22.77, "PROVEEDOR": proveedor, "VALOR UNITARIO": 2062287.50, "FECHA ENTREGA": fecha_entrega},
-            {"POS": 8, "DESIGNACIÓN": "OPGW - Tendido de OPGW", "UD": "Km", "CANTIDAD": 22.77, "PROVEEDOR": proveedor, "VALOR UNITARIO": 2749716.67, "FECHA ENTREGA": fecha_entrega},
-            {"POS": 9, "DESIGNACIÓN": "OPGW - Tensado y Grapado OPGW", "UD": "Km", "CANTIDAD": 22.77, "PROVEEDOR": proveedor, "VALOR UNITARIO": 1031143.75, "FECHA ENTREGA": fecha_entrega},
-            {"POS": 10, "DESIGNACIÓN": "OPGW - Instalación de Accesorios", "UD": "Km", "CANTIDAD": 22.77, "PROVEEDOR": proveedor, "VALOR UNITARIO": 343714.58, "FECHA ENTREGA": fecha_entrega},
-        ]
-
-    # Regla 4: Extractor Universal Genérico para cualquier otra cotización
-    else:
-        pos = 1
-        lines = texto_bruto.split('\n')
-        for l in lines:
-            line_str = l.strip()
-            if any(w in line_str.upper() for w in ["SUBTOTAL", "TOTAL", "IMPUESTO", "IVA", "PAGO", "ORDEN"]):
-                continue
-            # Buscar montos monetarios o en UF
-            match_gen = re.search(r'^(.*?)\s+(\d+[\.,]?\d*)\s*(UF|CLP|\$)?$', line_str, re.IGNORECASE)
-            if match_gen:
-                desc, val_str, mon = match_gen.groups()
-                if len(desc.strip()) > 3:
-                    val_num = float(val_str.replace('.', '').replace(',', '.'))
-                    items.append({
-                        "POS": pos,
-                        "DESIGNACIÓN": desc.strip()[:80],
-                        "UD": mon.upper() if mon else "UN",
-                        "CANTIDAD": 1.0,
-                        "PROVEEDOR": proveedor,
-                        "VALOR UNITARIO": val_num,
-                        "FECHA ENTREGA": fecha_entrega
-                    })
-                    pos += 1
-
-    return items
-
+# --- GENERADORES DE ARCHIVOS DE SALIDA ---
 def generar_excel(items, solicitante, cc, entrega):
     wb = openpyxl.load_workbook("FI.CHL.GEN-07.02A Rev.02 (25_03_2024) SOLICITUD DE COMPRA_CLA_MA (Formato 2024).xlsx")
     ws = wb.active
@@ -137,6 +146,7 @@ def generar_excel(items, solicitante, cc, entrega):
     ws['E6'] = cc
     ws['E7'] = entrega
     
+    # Limpiar contenido anterior
     for r in range(14, 35):
         for col_idx in [1, 4, 6, 7, 8, 9, 10, 11]:
             cell = ws.cell(row=r, column=col_idx)
@@ -157,7 +167,7 @@ def generar_excel(items, solicitante, cc, entrega):
     wb.save(out)
     return out.getvalue()
 
-def generar_pdf(items, solicitante, cc, entrega):
+def generar_pdf(items, solicitante, cc, entrega, proveedor):
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=landscape(letter), leftMargin=20, rightMargin=20, topMargin=20, bottomMargin=20)
     styles = getSampleStyleSheet()
@@ -182,7 +192,7 @@ def generar_pdf(items, solicitante, cc, entrega):
     
     meta_data = [
         [Paragraph("<b>NOMBRE:</b>", style_cell_bold), Paragraph(solicitante, style_cell), Paragraph("<b>APROBADO POR:</b>", style_cell_bold), Paragraph("_________________", style_cell)],
-        [Paragraph("<b>CÓDIGO / CENTRO COSTO:</b>", style_cell_bold), Paragraph(str(cc), style_cell), Paragraph("<b>OBSERVACIONES:</b>", style_cell_bold), Paragraph("Cotización procesada automáticamente", style_cell)],
+        [Paragraph("<b>CÓDIGO / CENTRO COSTO:</b>", style_cell_bold), Paragraph(str(cc), style_cell), Paragraph("<b>OBSERVACIONES:</b>", style_cell_bold), Paragraph(f"Proveedor: {proveedor}", style_cell)],
         [Paragraph("<b>ENTREGA EN:</b>", style_cell_bold), Paragraph(entrega, style_cell), "", ""]
     ]
     t_meta = Table(meta_data, colWidths=[150, 220, 130, 250])
@@ -245,16 +255,31 @@ def generar_pdf(items, solicitante, cc, entrega):
     doc.build(elements)
     return buffer.getvalue()
 
+# --- INTERFAZ STREAMLIT ---
 if uploaded_pdf:
-    items = extraer_items_inteligente(uploaded_pdf.getvalue())
-    st.subheader("📋 Resumen de Ítems Extraídos de la Cotización")
+    items, proveedor = procesar_pdf_universal(uploaded_pdf.getvalue())
+    st.subheader(f"📋 Presupuesto Extraído ({proveedor})")
     
-    items_editados = st.data_editor(items, num_rows="dynamic", use_container_width=True)
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        excel_bytes = generar_excel(items_editados, solicitante, centro_costo, lugar_entrega)
-        st.download_button("📥 Descargar Excel SDC (.xlsx)", data=excel_bytes, file_name="Solicitud_de_Compra_SDC.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    with col2:
-        pdf_bytes = generar_pdf(items_editados, solicitante, centro_costo, lugar_entrega)
-        st.download_button("📄 Descargar PDF SDC (.pdf)", data=pdf_bytes, file_name="Solicitud_de_Compra_SDC.pdf", mime="application/pdf")
+    if items:
+        # Editor interactivo para permitir ajustes manuales inmediatos si el usuario lo desea
+        items_editados = st.data_editor(items, num_rows="dynamic", use_container_width=True)
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            excel_bytes = generar_excel(items_editados, solicitante, centro_costo, lugar_entrega)
+            st.download_button("📥 Descargar Excel SDC (.xlsx)", data=excel_bytes, file_name="Solicitud_de_Compra_SDC.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        with col2:
+            pdf_bytes = generar_pdf(items_editados, solicitante, centro_costo, lugar_entrega, proveedor)
+            st.download_button("📄 Descargar PDF SDC (.pdf)", data=pdf_bytes, file_name="Solicitud_de_Compra_SDC.pdf", mime="application/pdf")
+    else:
+        st.error("No se detectaron líneas monetarias automáticas en este archivo. Puedes ingresar las líneas manualmente en la tabla a continuación.")
+        items_vacio = [{"POS": 1, "DESIGNACIÓN": "Descripción del Servicio", "UD": "UF", "CANTIDAD": 1.0, "PROVEEDOR": proveedor, "VALOR UNITARIO": 0.0, "FECHA ENTREGA": fecha_entrega}]
+        items_editados = st.data_editor(items_vacio, num_rows="dynamic", use_container_width=True)
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            excel_bytes = generar_excel(items_editados, solicitante, centro_costo, lugar_entrega)
+            st.download_button("📥 Descargar Excel SDC (.xlsx)", data=excel_bytes, file_name="Solicitud_de_Compra_SDC.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        with col2:
+            pdf_bytes = generar_pdf(items_editados, solicitante, centro_costo, lugar_entrega, proveedor)
+            st.download_button("📄 Descargar PDF SDC (.pdf)", data=pdf_bytes, file_name="Solicitud_de_Compra_SDC.pdf", mime="application/pdf")
