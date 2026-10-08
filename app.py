@@ -1,19 +1,19 @@
 import streamlit as st
 import openpyxl
+import pdfplumber
 from reportlab.lib.pagesizes import letter, landscape
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 import io
+import re
 
 st.set_page_config(page_title="Generador de Solicitudes de Compra (SDC)", layout="wide", page_icon="📄")
 
 st.title("📄 Generador Automático de Solicitud de Compra (SDC)")
-st.markdown("""
-Sube la **cotización en formato PDF** y completa los datos generales para generar automáticamente la **Solicitud de Compra (SDC)** en **Excel** y **PDF listo para firma**.
-""")
+st.markdown("Sube **cualquier cotización en PDF** para extraer sus ítems y generar la **Solicitud de Compra (SDC)** en Excel y PDF.")
 
-st.sidebar.header("📋 Datos de la Solicitud")
+st.sidebar.header("📋 Datos Generales")
 solicitante = st.sidebar.text_input("Nombre del Solicitante", value="Hector Gonzalez")
 centro_costo = st.sidebar.text_input("Código / Centro de Costo", value="90019")
 lugar_entrega = st.sidebar.text_input("Entrega en", value="Oficina Central")
@@ -21,19 +21,80 @@ fecha_entrega = st.sidebar.text_input("Fecha de Entrega Prometida", value="31/01
 
 uploaded_pdf = st.file_uploader("📎 Adjunta la Cotización (PDF)", type=["pdf"])
 
-def obtener_items_cotizacion():
-    return [
-        {"pos": 1, "designacion": "CONDUCTOR LAT 2x220 kV - Vestido Estructura", "ud": "Km", "cantidad": 22.77, "proveedor": "GRUPO LMH", "val_unitario": 6186862.512, "fecha_entrega": fecha_entrega},
-        {"pos": 2, "designacion": "CONDUCTOR LAT 2x220 kV - Riega Prepiloto y Piloto", "ud": "Km", "cantidad": 22.77, "proveedor": "GRUPO LMH", "val_unitario": 18560587.536, "fecha_entrega": fecha_entrega},
-        {"pos": 3, "designacion": "CONDUCTOR LAT 2x220 kV - Tendido de Cable Conductor", "ud": "Km", "cantidad": 22.77, "proveedor": "GRUPO LMH", "val_unitario": 24747450.0479, "fecha_entrega": fecha_entrega},
-        {"pos": 4, "designacion": "CONDUCTOR LAT 2x220 kV - Tensado y Grapado Cable Conductor", "ud": "Km", "cantidad": 22.77, "proveedor": "GRUPO LMH", "val_unitario": 9280293.768, "fecha_entrega": fecha_entrega},
-        {"pos": 5, "designacion": "CONDUCTOR LAT 2x220 kV - Instalación de Puentes y Accesorios", "ud": "Km", "cantidad": 22.77, "proveedor": "GRUPO LMH", "val_unitario": 3093431.256, "fecha_entrega": fecha_entrega},
-        {"pos": 6, "designacion": "OPGW - Vestido Estructura", "ud": "Km", "cantidad": 22.77, "proveedor": "GRUPO LMH", "val_unitario": 687429.168, "fecha_entrega": fecha_entrega},
-        {"pos": 7, "designacion": "OPGW - Tendido de Prepiloto y Piloto", "ud": "Km", "cantidad": 22.77, "proveedor": "GRUPO LMH", "val_unitario": 2062287.504, "fecha_entrega": fecha_entrega},
-        {"pos": 8, "designacion": "OPGW - Tendido de OPGW", "ud": "Km", "cantidad": 22.77, "proveedor": "GRUPO LMH", "val_unitario": 2749716.672, "fecha_entrega": fecha_entrega},
-        {"pos": 9, "designacion": "OPGW - Tensado y Grapado OPGW", "ud": "Km", "cantidad": 22.77, "proveedor": "GRUPO LMH", "val_unitario": 1031143.752, "fecha_entrega": fecha_entrega},
-        {"pos": 10, "designacion": "OPGW - Instalación de Accesorios", "ud": "Km", "cantidad": 22.77, "proveedor": "GRUPO LMH", "val_unitario": 343714.584, "fecha_entrega": fecha_entrega},
-    ]
+def extraer_items_de_pdf(pdf_bytes):
+    items = []
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        pos = 1
+        for page in pdf.pages:
+            # 1. Intentar extraer tablas estructuradas del PDF
+            tablas = page.extract_tables()
+            for tabla in tablas:
+                for fila in tabla:
+                    if not fila or len(fila) < 3:
+                        continue
+                    # Filtrar encabezados comunes de tablas
+                    texto_fila = " ".join([str(c) for c in fila if c]).upper()
+                    if "DESCRIP" in texto_fila or "CANT" in texto_fila or "ITEM" in texto_fila or "PRECIO" in texto_fila:
+                        continue
+                    
+                    # Intentar obtener descripción, cantidad y precio
+                    textos = [str(c).strip().replace('\n', ' ') for c in fila if c]
+                    if len(textos) >= 3:
+                        desc = textos[0] if len(textos[0]) > 3 else textos[1]
+                        # Buscar números en la fila
+                        nums = [re.sub(r'[^\d,\.]', '', t) for t in textos if re.search(r'\d', t)]
+                        val_unit = 0.0
+                        cant = 1.0
+                        if len(nums) >= 2:
+                            try:
+                                cant = float(nums[0].replace(',', '.'))
+                                val_unit = float(nums[1].replace('.', '').replace(',', '.'))
+                            except:
+                                pass
+                        elif len(nums) == 1:
+                            try:
+                                val_unit = float(nums[0].replace('.', '').replace(',', '.'))
+                            except:
+                                pass
+                        
+                        if desc and len(desc) > 2:
+                            items.append({
+                                "pos": pos,
+                                "designacion": desc[:80],
+                                "ud": "Unid",
+                                "cantidad": cant,
+                                "proveedor": "PROVEEDOR",
+                                "val_unitario": val_unit,
+                                "fecha_entrega": fecha_entrega
+                            })
+                            pos += 1
+            
+            # 2. Si no encontró tablas formales, buscar por líneas de texto
+            if not items:
+                texto = page.extract_text() or ""
+                lineas = texto.split('\n')
+                for l in lineas:
+                    # Buscar líneas con montos
+                    match = re.search(r'^(.*?)\s+(\d+[\.,]?\d*)\s+(Km|M|UN|GL|UF|UNID)?\s*[\$]?\s*([\d\.,]+)', l.strip(), re.IGNORECASE)
+                    if match:
+                        desc, cant, ud, val = match.groups()
+                        if len(desc.strip()) > 3:
+                            try:
+                                v_u = float(val.replace('.', '').replace(',', '.'))
+                                c_u = float(cant.replace(',', '.'))
+                                items.append({
+                                    "pos": pos,
+                                    "designacion": desc.strip()[:80],
+                                    "ud": ud if ud else "GL",
+                                    "cantidad": c_u,
+                                    "proveedor": "PROVEEDOR",
+                                    "val_unitario": v_u,
+                                    "fecha_entrega": fecha_entrega
+                                })
+                                pos += 1
+                            except:
+                                pass
+    return items
 
 def generar_excel(items, solicitante, cc, entrega):
     wb = openpyxl.load_workbook("FI.CHL.GEN-07.02A Rev.02 (25_03_2024) SOLICITUD DE COMPRA_CLA_MA (Formato 2024).xlsx")
@@ -41,7 +102,6 @@ def generar_excel(items, solicitante, cc, entrega):
     ws['E5'] = solicitante
     ws['E6'] = cc
     ws['E7'] = entrega
-    ws['L5'] = 'Cotización N° 0169 - GRUPO LMH (Tendido LT Itahue - Mataquito)'
     
     for r in range(14, 35):
         for col_idx in [1, 4, 6, 7, 8, 9, 10, 11]:
@@ -88,7 +148,7 @@ def generar_pdf(items, solicitante, cc, entrega):
     
     meta_data = [
         [Paragraph("<b>NOMBRE:</b>", style_cell_bold), Paragraph(solicitante, style_cell), Paragraph("<b>APROBADO POR:</b>", style_cell_bold), Paragraph("_________________", style_cell)],
-        [Paragraph("<b>CÓDIGO / CENTRO COSTO:</b>", style_cell_bold), Paragraph(str(cc), style_cell), Paragraph("<b>OBSERVACIONES:</b>", style_cell_bold), Paragraph("Cotización N° 0169 - GRUPO LMH", style_cell)],
+        [Paragraph("<b>CÓDIGO / CENTRO COSTO:</b>", style_cell_bold), Paragraph(str(cc), style_cell), Paragraph("<b>OBSERVACIONES:</b>", style_cell_bold), Paragraph("Cotización procesada automáticamente", style_cell)],
         [Paragraph("<b>ENTREGA EN:</b>", style_cell_bold), Paragraph(entrega, style_cell), "", ""]
     ]
     t_meta = Table(meta_data, colWidths=[150, 220, 130, 250])
@@ -106,8 +166,8 @@ def generar_pdf(items, solicitante, cc, entrega):
         Paragraph("<b>UD.</b>", style_cell_bold),
         Paragraph("<b>CANT.</b>", style_cell_bold),
         Paragraph("<b>PROVEEDOR</b>", style_cell_bold),
-        Paragraph("<b>VALOR UNITARIO (CLP)</b>", style_cell_bold),
-        Paragraph("<b>VALOR TOTAL (CLP)</b>", style_cell_bold),
+        Paragraph("<b>VALOR UNITARIO</b>", style_cell_bold),
+        Paragraph("<b>VALOR TOTAL</b>", style_cell_bold),
         Paragraph("<b>FECHA ENTREGA</b>", style_cell_bold)
     ]]
     
@@ -152,14 +212,21 @@ def generar_pdf(items, solicitante, cc, entrega):
     return buffer.getvalue()
 
 if uploaded_pdf:
-    st.success("✅ Cotización procesada correctamente.")
-    items = obtener_items_cotizacion()
-    st.dataframe(items, use_container_width=True)
+    st.info("🔄 Procesando PDF de la cotización...")
+    items = extraer_items_de_pdf(uploaded_pdf.getvalue())
     
-    col1, col2 = st.columns(2)
-    with col1:
-        excel_bytes = generar_excel(items, solicitante, centro_costo, lugar_entrega)
-        st.download_button("📥 Descargar Excel SDC (.xlsx)", data=excel_bytes, file_name="Solicitud_de_Compra_SDC.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    with col2:
-        pdf_bytes = generar_pdf(items, solicitante, centro_costo, lugar_entrega)
-        st.download_button("📄 Descargar PDF SDC (.pdf)", data=pdf_bytes, file_name="Solicitud_de_Compra_SDC.pdf", mime="application/pdf")
+    if items:
+        st.success(f"✅ Se extrajeron automáticamente {len(items)} ítems de la cotización.")
+        
+        # Permitir editar la tabla directamente en pantalla si el usuario desea corregir algo
+        items_editados = st.data_editor(items, num_rows="dynamic", use_container_width=True)
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            excel_bytes = generar_excel(items_editados, solicitante, centro_costo, lugar_entrega)
+            st.download_button("📥 Descargar Excel SDC (.xlsx)", data=excel_bytes, file_name="Solicitud_de_Compra_SDC.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        with col2:
+            pdf_bytes = generar_pdf(items_editados, solicitante, centro_costo, lugar_entrega)
+            st.download_button("📄 Descargar PDF SDC (.pdf)", data=pdf_bytes, file_name="Solicitud_de_Compra_SDC.pdf", mime="application/pdf")
+    else:
+        st.warning("⚠️ No se pudieron extraer tablas automáticas de este PDF. Puedes agregar los ítems manualmente abajo.")
