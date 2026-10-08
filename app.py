@@ -52,5 +52,3 @@ def analizar_pdf_con_ia(texto_pdf, api_key):
     )
     
     return json.loads(response.choices[0].message.content)
-
-# Lógica de generación de Excel y PDF...
